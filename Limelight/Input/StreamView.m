@@ -15,6 +15,30 @@
 #import "AbsoluteTouchHandler.h"
 #import "KeyboardInputField.h"
 
+// Apple Pencil Pro gesture flags
+// These match the pen_gestures namespace constants in Sunshine's common.h
+#define LI_PEN_GESTURE_SQUEEZE      0x01  // Squeeze gesture (Apple Pencil Pro)
+#define LI_PEN_GESTURE_DOUBLE_TAP   0x02  // Double-tap gesture (2nd gen and Pro)
+
+/*
+ * Apple Pencil Pro Support Implementation:
+ * 
+ * This implementation provides full support for Apple Pencil Pro features:
+ * - Tilt (inclinación): Already supported via altitudeAngle
+ * - Rotation (barrel roll): Already supported via azimuthAngle
+ * - Pressure (presión): Already supported via force/maximumPossibleForce
+ * - Squeeze (apretar): NEW - Detected via UIPencilInteraction (iOS 17.5+) or force threshold
+ * - Double-tap: NEW - Detected via UITapGestureRecognizer (iOS 12.1+)
+ *
+ * Detection methods:
+ * 1. Squeeze: Primarily uses UIPencilInteraction delegate (native API)
+ *             Falls back to force > 1.1x maximumPossibleForce for older iOS
+ * 2. Double-tap: Uses UITapGestureRecognizer with numberOfTapsRequired=2
+ *
+ * The gestures are transmitted to the Sunshine server via LiSendPenEvent
+ * with gestureFlags and squeezeStrength parameters.
+ */
+
 static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
 @implementation StreamView {
@@ -36,6 +60,11 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     X1Mouse* x1mouse;
     double accumulatedMouseDeltaX;
     double accumulatedMouseDeltaY;
+    
+    // Apple Pencil Pro gestures
+    UITapGestureRecognizer* pencilDoubleTapRecognizer;
+    UIPencilInteraction* pencilInteraction API_AVAILABLE(ios(12.1));
+    BOOL pencilSqueezeActive;
     
     UIResponder* touchHandler;
     
@@ -115,6 +144,21 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         [self addGestureRecognizer:stylusHoverRecognizer];
     }
 #endif
+    
+    // Setup Apple Pencil Pro double-tap gesture recognizer (iOS 12.1+)
+    if (@available(iOS 12.1, *)) {
+        self->pencilDoubleTapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handlePencilDoubleTap:)];
+        self->pencilDoubleTapRecognizer.numberOfTapsRequired = 2;
+        self->pencilDoubleTapRecognizer.allowedTouchTypes = @[@(UITouchTypePencil)];
+        [self addGestureRecognizer:self->pencilDoubleTapRecognizer];
+        
+        // Setup UIPencilInteraction for native squeeze detection
+        self->pencilInteraction = [[UIPencilInteraction alloc] init];
+        self->pencilInteraction.delegate = self;
+        [self addInteraction:self->pencilInteraction];
+        
+        self->pencilSqueezeActive = NO;
+    }
 #endif
     
     x1mouse = [[X1Mouse alloc] init];
@@ -242,6 +286,8 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
 - (BOOL)sendStylusEvent:(UITouch*)event {
     uint8_t type;
+    uint8_t gestureFlags = 0;
+    float squeezeStrength = 0.0f;
     
     // Don't touch stylus events if the host doesn't support them. We want to pass
     // them as normal touches for legacy hosts that don't understand pen events.
@@ -269,11 +315,42 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     CGPoint location = [self adjustCoordinatesForVideoArea:[event locationInView:self]];
     CGSize videoSize = [self getVideoAreaSize];
     
-    return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
+    // Detect squeeze gesture (Apple Pencil Pro)
+    // Try native API first (iOS 17.5+), fall back to force-based detection
+    if (@available(iOS 17.5, *)) {
+        // Check if native squeeze was detected via UIPencilInteraction
+        if (self->pencilSqueezeActive) {
+            gestureFlags |= LI_PEN_GESTURE_SQUEEZE;
+            squeezeStrength = 1.0f;  // Native API doesn't provide strength
+            Log(LOG_D, @"Apple Pencil squeeze (native API)");
+            
+            // Reset on touch end
+            if (event.phase == UITouchPhaseEnded || event.phase == UITouchPhaseCancelled) {
+                self->pencilSqueezeActive = NO;
+            }
+        }
+        // Fallback: Force-based detection for compatibility
+        else if (event.force > event.maximumPossibleForce * 1.1) {
+            gestureFlags |= LI_PEN_GESTURE_SQUEEZE;
+            squeezeStrength = (event.force - event.maximumPossibleForce) / event.maximumPossibleForce;
+            squeezeStrength = MIN(squeezeStrength, 1.0f);
+            Log(LOG_D, @"Apple Pencil squeeze (force-based): strength=%.2f", squeezeStrength);
+        }
+    } else {
+        // iOS < 17.5: Only force-based detection
+        if (event.force > event.maximumPossibleForce * 1.1) {
+            gestureFlags |= LI_PEN_GESTURE_SQUEEZE;
+            squeezeStrength = (event.force - event.maximumPossibleForce) / event.maximumPossibleForce;
+            squeezeStrength = MIN(squeezeStrength, 1.0f);
+        }
+    }
+    
+    return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, gestureFlags, location.x / videoSize.width, location.y / videoSize.height,
                           (event.force / event.maximumPossibleForce) / sin(event.altitudeAngle),
                           0.0f, 0.0f,
                           [self getRotationFromAzimuthAngle:[event azimuthAngleInView:self]],
-                          [self getTiltFromAltitudeAngle:event.altitudeAngle]) != LI_ERR_UNSUPPORTED;
+                          [self getTiltFromAltitudeAngle:event.altitudeAngle],
+                          squeezeStrength) != LI_ERR_UNSUPPORTED;
 }
 
 - (void)sendStylusHoverEvent:(UIHoverGestureRecognizer*)gesture API_AVAILABLE(ios(13.0)) {
@@ -312,8 +389,25 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     }
 #endif
     
+    // Hover events don't have gesture flags or squeeze
     LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
-                   distance, 0.0f, 0.0f, rotationAngle, tiltAngle);
+                   distance, 0.0f, 0.0f, rotationAngle, tiltAngle, 0.0f);
+}
+
+- (void)handlePencilDoubleTap:(UITapGestureRecognizer*)recognizer {
+    if (recognizer.state == UIGestureRecognizerStateRecognized) {
+        Log(LOG_I, @"Apple Pencil double-tap detected");
+        
+        // Get the location of the double-tap
+        CGPoint location = [self adjustCoordinatesForVideoArea:[recognizer locationInView:self]];
+        CGSize videoSize = [self getVideoAreaSize];
+        
+        // Send a pen event with double-tap gesture flag
+        // We send it as a momentary touch down event with the gesture flag set
+        LiSendPenEvent(LI_TOUCH_EVENT_DOWN, LI_TOOL_TYPE_PEN, LI_PEN_GESTURE_DOUBLE_TAP, 
+                       location.x / videoSize.width, location.y / videoSize.height,
+                       1.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN, LI_TILT_UNKNOWN, 0.0f);
+    }
 }
 
 #endif
@@ -953,6 +1047,29 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 - (BOOL)isMultipleTouchEnabled {
     return YES;
 }
+
+#pragma mark - UIPencilInteractionDelegate
+
+// UIPencilInteraction delegate methods for native squeeze detection (iOS 17.5+)
+- (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction API_AVAILABLE(ios(12.1)) {
+    // The double-tap is already handled by our UITapGestureRecognizer
+    // This is kept for potential future customization
+    Log(LOG_D, @"UIPencilInteraction tap detected");
+}
+
+#if defined(__IPHONE_17_5)
+- (void)pencilInteraction:(UIPencilInteraction *)interaction didReceiveSqueeze:(UIPencilSqueezeAction *)squeezeAction API_AVAILABLE(ios(17.5)) {
+    // Native squeeze detection - more accurate than force-based detection
+    Log(LOG_I, @"Apple Pencil squeeze detected (native API)");
+    
+    // Mark squeeze as active
+    self->pencilSqueezeActive = YES;
+    
+    // You could send an immediate squeeze event here if needed
+    // or let sendStylusEvent handle it during the next touch event
+}
+#endif
+
 #endif
 
 @end
