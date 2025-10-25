@@ -345,12 +345,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         }
     }
     
+    // Note: LiSendPenEvent doesn't support squeezeStrength parameter yet
+    // Using gestureFlags to indicate squeeze state instead
     return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, gestureFlags, location.x / videoSize.width, location.y / videoSize.height,
                           (event.force / event.maximumPossibleForce) / sin(event.altitudeAngle),
                           0.0f, 0.0f,
                           [self getRotationFromAzimuthAngle:[event azimuthAngleInView:self]],
-                          [self getTiltFromAltitudeAngle:event.altitudeAngle],
-                          squeezeStrength) != LI_ERR_UNSUPPORTED;
+                          [self getTiltFromAltitudeAngle:event.altitudeAngle]) != LI_ERR_UNSUPPORTED;
 }
 
 - (void)sendStylusHoverEvent:(UIHoverGestureRecognizer*)gesture API_AVAILABLE(ios(13.0)) {
@@ -391,7 +392,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     // Hover events don't have gesture flags or squeeze
     LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
-                   distance, 0.0f, 0.0f, rotationAngle, tiltAngle, 0.0f);
+                   distance, 0.0f, 0.0f, rotationAngle, tiltAngle);
 }
 
 - (void)handlePencilDoubleTap:(UITapGestureRecognizer*)recognizer {
@@ -406,7 +407,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         // We send it as a momentary touch down event with the gesture flag set
         LiSendPenEvent(LI_TOUCH_EVENT_DOWN, LI_TOOL_TYPE_PEN, LI_PEN_GESTURE_DOUBLE_TAP, 
                        location.x / videoSize.width, location.y / videoSize.height,
-                       1.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN, LI_TILT_UNKNOWN, 0.0f);
+                       1.0f, 0.0f, 0.0f, LI_ROT_UNKNOWN, LI_TILT_UNKNOWN);
     }
 }
 
@@ -1058,7 +1059,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 #if defined(__IPHONE_17_5)
-- (void)pencilInteraction:(UIPencilInteraction *)interaction didReceiveSqueeze:(UIPencilSqueezeAction *)squeezeAction API_AVAILABLE(ios(17.5)) {
+- (void)pencilInteraction:(UIPencilInteraction *)interaction didReceiveSqueeze:(id)squeezeAction API_AVAILABLE(ios(17.5)) {
     // Native squeeze detection - more accurate than force-based detection
     Log(LOG_I, @"Apple Pencil squeeze detected (native API)");
     
