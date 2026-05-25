@@ -44,6 +44,15 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     BOOL hasUserInteracted;
     
     NSDictionary<NSString *, NSNumber *> *dictCodes;
+    
+    // Apple Pencil state
+    uint8_t _currentPenButtons;
+    float _lastPenX;
+    float _lastPenY;
+    float _lastPenPressure;
+    uint16_t _lastPenRotation;
+    uint8_t _lastPenTilt;
+    uint16_t _lastBarrelRoll;
 }
 
 - (void) setupStreamView:(ControllerSupport*)controllerSupport
@@ -115,6 +124,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         [self addGestureRecognizer:stylusHoverRecognizer];
     }
 #endif
+
+    if (@available(iOS 12.1, *)) {
+        UIPencilInteraction *pencilInteraction = [[UIPencilInteraction alloc] init];
+        pencilInteraction.delegate = self;
+        pencilInteraction.enabled = YES;
+        [self addInteraction:pencilInteraction];
+    }
 #endif
     
     x1mouse = [[X1Mouse alloc] init];
@@ -269,11 +285,27 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     CGPoint location = [self adjustCoordinatesForVideoArea:[event locationInView:self]];
     CGSize videoSize = [self getVideoAreaSize];
     
-    return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
-                          (event.force / event.maximumPossibleForce) / sin(event.altitudeAngle),
+    _lastPenX = location.x / videoSize.width;
+    _lastPenY = location.y / videoSize.height;
+    _lastPenPressure = (event.force / event.maximumPossibleForce) / sin(event.altitudeAngle);
+    _lastPenRotation = [self getRotationFromAzimuthAngle:[event azimuthAngleInView:self]];
+    _lastPenTilt = [self getTiltFromAltitudeAngle:event.altitudeAngle];
+    
+#if defined(__IPHONE_17_5)
+    if (@available(iOS 17.5, *)) {
+        if (event.type == UITouchTypePencil) {
+            CGFloat barrelRoll = event.rollAngle;
+            int32_t rollDegrees = (int32_t)(barrelRoll * (180.0f / M_PI));
+            if (rollDegrees < 0) rollDegrees += 360;
+            _lastBarrelRoll = (uint16_t)rollDegrees;
+        }
+    }
+#endif
+    
+    return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, _currentPenButtons,
+                          _lastPenX, _lastPenY, _lastPenPressure,
                           0.0f, 0.0f,
-                          [self getRotationFromAzimuthAngle:[event azimuthAngleInView:self]],
-                          [self getTiltFromAltitudeAngle:event.altitudeAngle]) != LI_ERR_UNSUPPORTED;
+                          _lastPenRotation, _lastPenTilt) != LI_ERR_UNSUPPORTED;
 }
 
 - (void)sendStylusHoverEvent:(UIHoverGestureRecognizer*)gesture API_AVAILABLE(ios(13.0)) {
@@ -312,9 +344,45 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     }
 #endif
     
-    LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
+    LiSendPenEvent(type, LI_TOOL_TYPE_PEN, _currentPenButtons, location.x / videoSize.width, location.y / videoSize.height,
                    distance, 0.0f, 0.0f, rotationAngle, tiltAngle);
 }
+
+#pragma mark - UIPencilInteractionDelegate
+
+- (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction API_AVAILABLE(ios(12.1)) {
+    _currentPenButtons |= LI_PEN_BUTTON_SECONDARY;
+    LiSendPenEvent(LI_TOUCH_EVENT_MOVE, LI_TOOL_TYPE_PEN, _currentPenButtons,
+                   _lastPenX, _lastPenY, _lastPenPressure,
+                   0.0f, 0.0f, _lastPenRotation, _lastPenTilt);
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        self->_currentPenButtons &= ~LI_PEN_BUTTON_SECONDARY;
+        LiSendPenEvent(LI_TOUCH_EVENT_MOVE, LI_TOOL_TYPE_PEN, self->_currentPenButtons,
+                       self->_lastPenX, self->_lastPenY, self->_lastPenPressure,
+                       0.0f, 0.0f, self->_lastPenRotation, self->_lastPenTilt);
+    });
+}
+
+#if defined(__IPHONE_17_5)
+- (void)pencilInteraction:(UIPencilInteraction *)interaction
+        didReceiveSqueeze:(UIPencilInteractionSqueeze *)squeeze API_AVAILABLE(ios(17.5)) {
+    switch (squeeze.phase) {
+        case UIPencilInteractionPhaseBegan:
+            _currentPenButtons |= LI_PEN_BUTTON_PRIMARY;
+            break;
+        case UIPencilInteractionPhaseEnded:
+        case UIPencilInteractionPhaseCancelled:
+            _currentPenButtons &= ~LI_PEN_BUTTON_PRIMARY;
+            break;
+        default:
+            return;
+    }
+    LiSendPenEvent(LI_TOUCH_EVENT_MOVE, LI_TOOL_TYPE_PEN, _currentPenButtons,
+                   _lastPenX, _lastPenY, _lastPenPressure,
+                   0.0f, 0.0f, _lastPenRotation, _lastPenTilt);
+}
+#endif
 
 #endif
 
@@ -513,7 +581,18 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     if (@available(iOS 13.4, *)) {
         for (UITouch* touch in touches) {
             if (touch.type == UITouchTypePencil) {
-                if ([self sendStylusEvent:touch]) {
+                BOOL handled = NO;
+                NSArray *coalesced = [event coalescedTouchesForTouch:touch];
+                if (coalesced.count > 0) {
+                    for (UITouch *coalescedTouch in coalesced) {
+                        if ([self sendStylusEvent:coalescedTouch]) {
+                            handled = YES;
+                        }
+                    }
+                } else {
+                    handled = [self sendStylusEvent:touch];
+                }
+                if (handled) {
                     return;
                 }
             }
