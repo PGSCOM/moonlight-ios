@@ -1,0 +1,103 @@
+name: Build Unsigned IPA
+
+# Corre en cada push a master, en PRs, o manualmente desde la UI de GitHub
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Moonlight iOS – Unsigned IPA
+    runs-on: macos-latest  # macOS Sequoia con Xcode 16.x
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      # --recursive descarga los submodules:
+      #   • moonlight-common/moonlight-common-c
+      #   • X1Kit
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── 2. Verificar versión de Xcode disponible ─────────────────────────
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      # ── 3. Resolver dependencias Swift Package Manager ───────────────────
+      # El repo tiene Package.resolved commiteado en:
+      #   Moonlight.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      # Esto descarga OpenSSL-Package (única dep SPM del proyecto)
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project Moonlight.xcodeproj \
+            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData"
+
+      # ── 4. Compilar para dispositivo real (arm64, iphoneos) ──────────────
+      # Notas sobre los flags de firma:
+      #   CODE_SIGNING_ALLOWED=NO   → no intenta firmar en ningún paso
+      #   CODE_SIGNING_REQUIRED=NO  → no falla si no hay identidad
+      #   CODE_SIGN_IDENTITY=""     → anula cualquier identidad configurada en el proyecto
+      #   DEVELOPMENT_TEAM=""       → limpia el team (DM46QST4M7 en el proyecto original)
+      #
+      # Usamos -target en lugar de -scheme porque los .xcscheme están en
+      # .gitignore y no se commitean en este repo.
+      - name: Build (unsigned, iphoneos SDK)
+        run: |
+          xcodebuild build \
+            -project Moonlight.xcodeproj \
+            -target Moonlight \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData" \
+            | xcpretty || true
+          # xcpretty formatea la salida; el '|| true' evita que un exit code
+          # de xcpretty rompa el step si xcodebuild en sí tuvo éxito.
+          # Verificamos el éxito buscando el .app a continuación.
+
+      # ── 5. Verificar que el .app existe ──────────────────────────────────
+      - name: Locate Moonlight.app
+        id: locate_app
+        run: |
+          APP=$(find "$GITHUB_WORKSPACE/DerivedData/Build/Products/Release-iphoneos" \
+                  -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "ERROR: Moonlight.app not found. Build may have failed."
+            find "$GITHUB_WORKSPACE/DerivedData/Build/Products" -name "*.app" 2>/dev/null || true
+            exit 1
+          fi
+          echo "APP_PATH=$APP" >> "$GITHUB_OUTPUT"
+          echo "Found: $APP"
+
+      # ── 6. Empaquetar como .ipa sin firma ─────────────────────────────────
+      # La estructura de un IPA es simplemente un ZIP con:
+      #   Payload/
+      #     NombreApp.app/
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -r "${{ steps.locate_app.outputs.APP_PATH }}" Payload/
+          zip -qry Moonlight-unsigned.ipa Payload/
+          rm -rf Payload
+          echo "IPA size: $(du -sh Moonlight-unsigned.ipa | cut -f1)"
+
+      # ── 7. Subir el artefacto ─────────────────────────────────────────────
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Moonlight-unsigned-${{ github.sha }}
+          path: Moonlight-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
