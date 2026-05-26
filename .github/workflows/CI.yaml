@@ -15,9 +15,6 @@ jobs:
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
-      # --recursive descarga los submodules:
-      #   • moonlight-common/moonlight-common-c
-      #   • X1Kit
       - name: Checkout repository (with submodules)
         uses: actions/checkout@v4
         with:
@@ -28,27 +25,15 @@ jobs:
         run: xcodebuild -version
 
       # ── 3. Resolver dependencias Swift Package Manager ───────────────────
-      # El repo tiene Package.resolved commiteado en:
-      #   Moonlight.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
-      # Esto descarga OpenSSL-Package (única dep SPM del proyecto).
-      # NOTA: -derivedDataPath no es compatible con -resolvePackageDependencies
-      # ni con -target sin -scheme (y los .xcscheme están gitignoreados).
-      # Sin el flag, xcodebuild usa ~/Library/Developer/Xcode/DerivedData/
       - name: Resolve Swift Package dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
             -project Moonlight.xcodeproj
 
       # ── 4. Compilar para dispositivo real (arm64, iphoneos) ──────────────
-      # Notas sobre los flags de firma:
-      #   CODE_SIGNING_ALLOWED=NO   → no intenta firmar en ningún paso
-      #   CODE_SIGNING_REQUIRED=NO  → no falla si no hay identidad
-      #   CODE_SIGN_IDENTITY=""     → anula cualquier identidad del .xcodeproj
-      #   DEVELOPMENT_TEAM=""       → limpia el team ID DM46QST4M7 del proyecto
-      #
-      # SIN -derivedDataPath: xcodebuild lo rechaza con -target sin -scheme.
-      # El .app queda en ~/Library/Developer/Xcode/DerivedData/<proj>-<hash>/
-      #                   Build/Products/Release-iphoneos/
+      # Sin -derivedDataPath (incompatible con -target sin -scheme).
+      # Sin pipe a xcpretty: si xcpretty no arranca o falla, el broken pipe
+      # mata xcodebuild antes de escribir el .app.
       - name: Build (unsigned, iphoneos SDK)
         run: |
           xcodebuild build \
@@ -63,31 +48,35 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            | xcpretty || true
+            PROVISIONING_PROFILE_SPECIFIER=""
 
       # ── 5. Localizar el .app en DerivedData ──────────────────────────────
+      # Usamos -name + -type d en lugar de -path glob, más robusto.
+      # DerivedData sin -derivedDataPath → ~/Library/Developer/Xcode/DerivedData/
       - name: Locate Moonlight.app
         id: locate_app
         run: |
+          echo "=== Contenido de DerivedData ==="
+          ls ~/Library/Developer/Xcode/DerivedData/ 2>/dev/null || echo "(vacío o no existe)"
+
           APP=$(find ~/Library/Developer/Xcode/DerivedData \
-                  -path "*/Release-iphoneos/*.app" -maxdepth 6 | head -1)
+                  -name "Moonlight.app" -type d 2>/dev/null | head -1)
+
           if [ -z "$APP" ]; then
-            echo "ERROR: Moonlight.app not found. Build may have failed."
-            find ~/Library/Developer/Xcode/DerivedData -name "*.app" 2>/dev/null || true
+            echo "ERROR: Moonlight.app no encontrado."
+            echo "=== Todos los .app en DerivedData ==="
+            find ~/Library/Developer/Xcode/DerivedData -name "*.app" -type d 2>/dev/null || true
             exit 1
           fi
+
+          echo "Encontrado: $APP"
           echo "APP_PATH=$APP" >> "$GITHUB_OUTPUT"
-          echo "Found: $APP"
 
       # ── 6. Empaquetar como .ipa sin firma ─────────────────────────────────
-      # La estructura de un IPA es simplemente un ZIP con:
-      #   Payload/
-      #     NombreApp.app/
       - name: Package unsigned IPA
         run: |
           mkdir -p Payload
-          cp -r "${{ steps.locate_app.outputs.APP_PATH }}" Payload/
+          cp -r "${{ steps.locate_app.outputs.APP_PATH }}" Payload/Moonlight.app
           zip -qry Moonlight-unsigned.ipa Payload/
           rm -rf Payload
           echo "IPA size: $(du -sh Moonlight-unsigned.ipa | cut -f1)"
