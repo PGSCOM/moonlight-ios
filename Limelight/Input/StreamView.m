@@ -53,6 +53,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     uint16_t _lastPenRotation;
     uint8_t _lastPenTilt;
     uint16_t _lastBarrelRoll;
+    BOOL _isPencilHovering;
 }
 
 - (void) setupStreamView:(ControllerSupport*)controllerSupport
@@ -259,6 +260,8 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 - (BOOL)sendStylusEvent:(UITouch*)event {
     uint8_t type;
     
+    _isPencilHovering = NO;
+    
     // Don't touch stylus events if the host doesn't support them. We want to pass
     // them as normal touches for legacy hosts that don't understand pen events.
     if (!(LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS)) {
@@ -315,10 +318,14 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         case UIGestureRecognizerStateBegan:
         case UIGestureRecognizerStateChanged:
             type = LI_TOUCH_EVENT_HOVER;
+            _isPencilHovering = YES;
             break;
 
         case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
             type = LI_TOUCH_EVENT_HOVER_LEAVE;
+            _isPencilHovering = NO;
             break;
 
         default:
@@ -694,20 +701,23 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
-    [touchHandler touchesCancelled:touches withEvent:event];
-    [self handleMouseButtonEvent:BUTTON_ACTION_RELEASE
-                      forTouches:touches
-                       withEvent:event];
 #if !TARGET_OS_TV
     if (@available(iOS 13.4, *)) {
         for (UITouch* touch in touches) {
             if (touch.type == UITouchTypePencil) {
                 _currentPenButtons = 0;
-                [self sendStylusEvent:touch];
+                if ([self sendStylusEvent:touch]) {
+                    return;
+                }
             }
         }
     }
 #endif
+    
+    [touchHandler touchesCancelled:touches withEvent:event];
+    [self handleMouseButtonEvent:BUTTON_ACTION_RELEASE
+                      forTouches:touches
+                       withEvent:event];
 }
 
 #if !TARGET_OS_TV
@@ -757,7 +767,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     // Move the cursor on the host if no buttons are pressed.
     // Motion with buttons pressed in handled in touchesMoved:
-    if (lastMouseButtonMask == 0) {
+    if (lastMouseButtonMask == 0 && !_isPencilHovering) {
         [self updateCursorLocation:request.location isMouse:YES];
     }
     
