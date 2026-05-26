@@ -30,12 +30,14 @@ jobs:
       # ── 3. Resolver dependencias Swift Package Manager ───────────────────
       # El repo tiene Package.resolved commiteado en:
       #   Moonlight.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
-      # Esto descarga OpenSSL-Package (única dep SPM del proyecto)
+      # Esto descarga OpenSSL-Package (única dep SPM del proyecto).
+      # NOTA: -derivedDataPath no es compatible con -resolvePackageDependencies
+      # sin -scheme (y los .xcscheme están gitignoreados). Los paquetes se
+      # resuelven al cache global de Xcode; el build step los encuentra solo.
       - name: Resolve Swift Package dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
-            -project Moonlight.xcodeproj \
-            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData"
+            -project Moonlight.xcodeproj
 
       # ── 4. Compilar para dispositivo real (arm64, iphoneos) ──────────────
       # Notas sobre los flags de firma:
