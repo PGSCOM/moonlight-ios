@@ -373,13 +373,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
 - (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction API_AVAILABLE(ios(12.1)) {
     _currentPenButtons |= LI_PEN_BUTTON_PRIMARY;
-    LiSendPenEvent(LI_TOUCH_EVENT_MOVE, LI_TOOL_TYPE_PEN, _currentPenButtons,
+    LiSendPenEvent(LI_TOUCH_EVENT_BUTTON_ONLY, LI_TOOL_TYPE_PEN, _currentPenButtons,
                    _lastPenX, _lastPenY, _lastPenPressure,
                    _lastBarrelRoll / 360.0f, 0.0f, _lastPenRotation, _lastPenTilt);
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         self->_currentPenButtons &= ~LI_PEN_BUTTON_PRIMARY;
-        LiSendPenEvent(LI_TOUCH_EVENT_MOVE, LI_TOOL_TYPE_PEN, self->_currentPenButtons,
+        LiSendPenEvent(LI_TOUCH_EVENT_BUTTON_ONLY, LI_TOOL_TYPE_PEN, self->_currentPenButtons,
                        self->_lastPenX, self->_lastPenY, self->_lastPenPressure,
                        self->_lastBarrelRoll / 360.0f, 0.0f, self->_lastPenRotation, self->_lastPenTilt);
     });
@@ -399,7 +399,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         default:
             return;
     }
-    LiSendPenEvent(LI_TOUCH_EVENT_MOVE, LI_TOOL_TYPE_PEN, _currentPenButtons,
+    LiSendPenEvent(LI_TOUCH_EVENT_BUTTON_ONLY, LI_TOOL_TYPE_PEN, _currentPenButtons,
                    _lastPenX, _lastPenY, _lastPenPressure,
                    _lastBarrelRoll / 360.0f, 0.0f, _lastPenRotation, _lastPenTilt);
 }
