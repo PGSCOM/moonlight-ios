@@ -30,13 +30,14 @@ jobs:
             -project Moonlight.xcodeproj
 
       # ── 4. Compilar ──────────────────────────────────────────────────────────
-      # CODE_SIGNING_ALLOWED=NO hace que Xcode 16 omita el paso de empaquetado
-      # y no produzca el .app. Usamos firma ad-hoc (CODE_SIGN_IDENTITY="-")
-      # que sí genera el bundle; luego la eliminamos con codesign.
+      # -derivedDataPath requiere -scheme y no funciona con -target.
+      # SYMROOT es un build setting (no un flag), funciona con -target y
+      # controla exactamente dónde van los productos: $SYMROOT/Release-iphoneos/
       #
-      # set -o pipefail + tee: captura el log Y propaga el exit code real de
-      # xcodebuild (sin pipefail, el exit code sería el de tee, siempre 0).
-      - name: Build (ad-hoc, iphoneos SDK)
+      # CODE_SIGNING_ALLOWED=NO impide que Xcode 16 empaquete el .app.
+      # Usamos CODE_SIGN_IDENTITY="-" (ad-hoc local) que sí genera el bundle;
+      # luego eliminamos la firma con codesign --remove-signature.
+      - name: Build (ad-hoc signed, iphoneos SDK)
         run: |
           set -o pipefail
           xcodebuild build \
@@ -45,6 +46,7 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
+            SYMROOT="$GITHUB_WORKSPACE/build" \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=YES \
@@ -54,51 +56,41 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="" \
             2>&1 | tee build.log
           grep -q "BUILD SUCCEEDED" build.log \
-            || { echo "❌ BUILD FAILED — últimas 60 líneas:"; tail -60 build.log; exit 1; }
+            || { echo "BUILD FAILED – últimas 60 líneas:"; tail -60 build.log; exit 1; }
 
       # ── 5. Localizar el .app ─────────────────────────────────────────────────
       - name: Locate Moonlight.app
         id: locate_app
         run: |
-          # Mostrar qué produjo el build
-          echo "=== Release-iphoneos contents ==="
-          ls ~/Library/Developer/Xcode/DerivedData/Moonlight-*/Build/Products/Release-iphoneos/ \
-            2>/dev/null || echo "(directorio no encontrado)"
+          echo "=== build/ contents ==="
+          find "$GITHUB_WORKSPACE/build" -maxdepth 3 2>/dev/null || echo "(vacío)"
 
-          # Buscar el .app (el productName del proyecto es "Limelight" aunque
-          # el bundle se llama "Moonlight", probamos ambos por seguridad)
-          APP=$(find ~/Library/Developer/Xcode/DerivedData \
-                  -name "Moonlight.app" -type d 2>/dev/null | head -1)
-          [ -z "$APP" ] && APP=$(find ~/Library/Developer/Xcode/DerivedData \
-                  -name "Limelight.app" -type d 2>/dev/null | head -1)
+          APP=$(find "$GITHUB_WORKSPACE/build/Release-iphoneos" \
+                  -maxdepth 1 -name "*.app" -type d 2>/dev/null | head -1)
 
           if [ -z "$APP" ]; then
-            echo "❌ No se encontró ningún .app"
-            find ~/Library/Developer/Xcode/DerivedData -name "*.app" -type d 2>/dev/null || true
+            echo "❌ No se encontró ningún .app en build/Release-iphoneos"
             exit 1
           fi
 
           echo "✅ Encontrado: $APP"
           echo "APP_PATH=$APP" >> "$GITHUB_OUTPUT"
 
-      # ── 6. Eliminar la firma ad-hoc → IPA sin firma ──────────────────────────
+      # ── 6. Eliminar firma ad-hoc ─────────────────────────────────────────────
       - name: Strip ad-hoc signature
         run: |
           APP="${{ steps.locate_app.outputs.APP_PATH }}"
-          # Eliminar firma del bundle principal y de los frameworks embebidos
-          find "$APP" -name "*.dylib" -o -name "*.framework" | while read f; do
+          find "$APP" \( -name "*.dylib" -o -name "*.framework" \) | while read f; do
             codesign --remove-signature "$f" 2>/dev/null || true
           done
           codesign --remove-signature "$APP" 2>/dev/null || true
-          echo "Signature removed"
 
       # ── 7. Empaquetar como .ipa ──────────────────────────────────────────────
       - name: Package unsigned IPA
         run: |
           APP="${{ steps.locate_app.outputs.APP_PATH }}"
-          APP_NAME=$(basename "$APP")
           mkdir -p Payload
-          cp -r "$APP" "Payload/$APP_NAME"
+          cp -r "$APP" "Payload/$(basename "$APP")"
           zip -qry Moonlight-unsigned.ipa Payload/
           rm -rf Payload
           echo "IPA size: $(du -sh Moonlight-unsigned.ipa | cut -f1)"
