@@ -32,8 +32,8 @@ jobs:
       #   Moonlight.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
       # Esto descarga OpenSSL-Package (única dep SPM del proyecto).
       # NOTA: -derivedDataPath no es compatible con -resolvePackageDependencies
-      # sin -scheme (y los .xcscheme están gitignoreados). Los paquetes se
-      # resuelven al cache global de Xcode; el build step los encuentra solo.
+      # ni con -target sin -scheme (y los .xcscheme están gitignoreados).
+      # Sin el flag, xcodebuild usa ~/Library/Developer/Xcode/DerivedData/
       - name: Resolve Swift Package dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
@@ -43,11 +43,12 @@ jobs:
       # Notas sobre los flags de firma:
       #   CODE_SIGNING_ALLOWED=NO   → no intenta firmar en ningún paso
       #   CODE_SIGNING_REQUIRED=NO  → no falla si no hay identidad
-      #   CODE_SIGN_IDENTITY=""     → anula cualquier identidad configurada en el proyecto
-      #   DEVELOPMENT_TEAM=""       → limpia el team (DM46QST4M7 en el proyecto original)
+      #   CODE_SIGN_IDENTITY=""     → anula cualquier identidad del .xcodeproj
+      #   DEVELOPMENT_TEAM=""       → limpia el team ID DM46QST4M7 del proyecto
       #
-      # Usamos -target en lugar de -scheme porque los .xcscheme están en
-      # .gitignore y no se commitean en este repo.
+      # SIN -derivedDataPath: xcodebuild lo rechaza con -target sin -scheme.
+      # El .app queda en ~/Library/Developer/Xcode/DerivedData/<proj>-<hash>/
+      #                   Build/Products/Release-iphoneos/
       - name: Build (unsigned, iphoneos SDK)
         run: |
           xcodebuild build \
@@ -63,21 +64,17 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData" \
             | xcpretty || true
-          # xcpretty formatea la salida; el '|| true' evita que un exit code
-          # de xcpretty rompa el step si xcodebuild en sí tuvo éxito.
-          # Verificamos el éxito buscando el .app a continuación.
 
-      # ── 5. Verificar que el .app existe ──────────────────────────────────
+      # ── 5. Localizar el .app en DerivedData ──────────────────────────────
       - name: Locate Moonlight.app
         id: locate_app
         run: |
-          APP=$(find "$GITHUB_WORKSPACE/DerivedData/Build/Products/Release-iphoneos" \
-                  -maxdepth 1 -name "*.app" | head -1)
+          APP=$(find ~/Library/Developer/Xcode/DerivedData \
+                  -path "*/Release-iphoneos/*.app" -maxdepth 6 | head -1)
           if [ -z "$APP" ]; then
             echo "ERROR: Moonlight.app not found. Build may have failed."
-            find "$GITHUB_WORKSPACE/DerivedData/Build/Products" -name "*.app" 2>/dev/null || true
+            find ~/Library/Developer/Xcode/DerivedData -name "*.app" 2>/dev/null || true
             exit 1
           fi
           echo "APP_PATH=$APP" >> "$GITHUB_OUTPUT"
