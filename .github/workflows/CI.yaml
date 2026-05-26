@@ -1,6 +1,5 @@
 name: Build Unsigned IPA
 
-# Corre en cada push a master, en PRs, o manualmente desde la UI de GitHub
 on:
   push:
     branches: [ master ]
@@ -11,77 +10,100 @@ on:
 jobs:
   build:
     name: Moonlight iOS – Unsigned IPA
-    runs-on: macos-latest  # macOS Sequoia con Xcode 16.x
+    runs-on: macos-latest
 
     steps:
-      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository (with submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ── 2. Verificar versión de Xcode disponible ─────────────────────────
+      # ── 2. Info de entorno ───────────────────────────────────────────────────
       - name: Show Xcode version
         run: xcodebuild -version
 
-      # ── 3. Resolver dependencias Swift Package Manager ───────────────────
+      # ── 3. Resolver dependencias SPM ─────────────────────────────────────────
       - name: Resolve Swift Package dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
             -project Moonlight.xcodeproj
 
-      # ── 4. Compilar para dispositivo real (arm64, iphoneos) ──────────────
-      # Sin -derivedDataPath (incompatible con -target sin -scheme).
-      # Sin pipe a xcpretty: si xcpretty no arranca o falla, el broken pipe
-      # mata xcodebuild antes de escribir el .app.
-      - name: Build (unsigned, iphoneos SDK)
+      # ── 4. Compilar ──────────────────────────────────────────────────────────
+      # CODE_SIGNING_ALLOWED=NO hace que Xcode 16 omita el paso de empaquetado
+      # y no produzca el .app. Usamos firma ad-hoc (CODE_SIGN_IDENTITY="-")
+      # que sí genera el bundle; luego la eliminamos con codesign.
+      #
+      # set -o pipefail + tee: captura el log Y propaga el exit code real de
+      # xcodebuild (sin pipefail, el exit code sería el de tee, siempre 0).
+      - name: Build (ad-hoc, iphoneos SDK)
         run: |
+          set -o pipefail
           xcodebuild build \
             -project Moonlight.xcodeproj \
             -target Moonlight \
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_ALLOWED=YES \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE="" \
-            PROVISIONING_PROFILE_SPECIFIER=""
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            2>&1 | tee build.log
+          grep -q "BUILD SUCCEEDED" build.log \
+            || { echo "❌ BUILD FAILED — últimas 60 líneas:"; tail -60 build.log; exit 1; }
 
-      # ── 5. Localizar el .app en DerivedData ──────────────────────────────
-      # Usamos -name + -type d en lugar de -path glob, más robusto.
-      # DerivedData sin -derivedDataPath → ~/Library/Developer/Xcode/DerivedData/
+      # ── 5. Localizar el .app ─────────────────────────────────────────────────
       - name: Locate Moonlight.app
         id: locate_app
         run: |
-          echo "=== Contenido de DerivedData ==="
-          ls ~/Library/Developer/Xcode/DerivedData/ 2>/dev/null || echo "(vacío o no existe)"
+          # Mostrar qué produjo el build
+          echo "=== Release-iphoneos contents ==="
+          ls ~/Library/Developer/Xcode/DerivedData/Moonlight-*/Build/Products/Release-iphoneos/ \
+            2>/dev/null || echo "(directorio no encontrado)"
 
+          # Buscar el .app (el productName del proyecto es "Limelight" aunque
+          # el bundle se llama "Moonlight", probamos ambos por seguridad)
           APP=$(find ~/Library/Developer/Xcode/DerivedData \
                   -name "Moonlight.app" -type d 2>/dev/null | head -1)
+          [ -z "$APP" ] && APP=$(find ~/Library/Developer/Xcode/DerivedData \
+                  -name "Limelight.app" -type d 2>/dev/null | head -1)
 
           if [ -z "$APP" ]; then
-            echo "ERROR: Moonlight.app no encontrado."
-            echo "=== Todos los .app en DerivedData ==="
+            echo "❌ No se encontró ningún .app"
             find ~/Library/Developer/Xcode/DerivedData -name "*.app" -type d 2>/dev/null || true
             exit 1
           fi
 
-          echo "Encontrado: $APP"
+          echo "✅ Encontrado: $APP"
           echo "APP_PATH=$APP" >> "$GITHUB_OUTPUT"
 
-      # ── 6. Empaquetar como .ipa sin firma ─────────────────────────────────
+      # ── 6. Eliminar la firma ad-hoc → IPA sin firma ──────────────────────────
+      - name: Strip ad-hoc signature
+        run: |
+          APP="${{ steps.locate_app.outputs.APP_PATH }}"
+          # Eliminar firma del bundle principal y de los frameworks embebidos
+          find "$APP" -name "*.dylib" -o -name "*.framework" | while read f; do
+            codesign --remove-signature "$f" 2>/dev/null || true
+          done
+          codesign --remove-signature "$APP" 2>/dev/null || true
+          echo "Signature removed"
+
+      # ── 7. Empaquetar como .ipa ──────────────────────────────────────────────
       - name: Package unsigned IPA
         run: |
+          APP="${{ steps.locate_app.outputs.APP_PATH }}"
+          APP_NAME=$(basename "$APP")
           mkdir -p Payload
-          cp -r "${{ steps.locate_app.outputs.APP_PATH }}" Payload/Moonlight.app
+          cp -r "$APP" "Payload/$APP_NAME"
           zip -qry Moonlight-unsigned.ipa Payload/
           rm -rf Payload
           echo "IPA size: $(du -sh Moonlight-unsigned.ipa | cut -f1)"
 
-      # ── 7. Subir el artefacto ─────────────────────────────────────────────
+      # ── 8. Subir artefacto ───────────────────────────────────────────────────
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
