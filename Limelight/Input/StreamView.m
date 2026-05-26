@@ -335,6 +335,9 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     CGPoint location = [self adjustCoordinatesForVideoArea:[gesture locationInView:self]];
     CGSize videoSize = [self getVideoAreaSize];
     
+    _lastPenX = location.x / videoSize.width;
+    _lastPenY = location.y / videoSize.height;
+    
     float distance = 0.0f;
 #if defined(__IPHONE_16_1) || defined(__TVOS_16_1)
     if (@available(iOS 16.1, *)) {
@@ -348,10 +351,21 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     if (@available(iOS 16.4, *)) {
         rotationAngle = [self getRotationFromAzimuthAngle:[gesture azimuthAngleInView:self]];
         tiltAngle = [self getTiltFromAltitudeAngle:gesture.altitudeAngle];
+        _lastPenRotation = rotationAngle;
+        _lastPenTilt = tiltAngle;
+    }
+#endif
+
+#if defined(__IPHONE_17_5)
+    if (@available(iOS 17.5, *)) {
+        CGFloat barrelRoll = gesture.rollAngle;
+        int32_t rollDegrees = (int32_t)(barrelRoll * (180.0f / M_PI));
+        if (rollDegrees < 0) rollDegrees += 360;
+        _lastBarrelRoll = (uint16_t)rollDegrees;
     }
 #endif
     
-    LiSendPenEvent(type, LI_TOOL_TYPE_PEN, _currentPenButtons, location.x / videoSize.width, location.y / videoSize.height,
+    LiSendPenEvent(type, LI_TOOL_TYPE_PEN, _currentPenButtons, _lastPenX, _lastPenY,
                    distance, _lastBarrelRoll / 360.0f, 0.0f, rotationAngle, tiltAngle);
 }
 
